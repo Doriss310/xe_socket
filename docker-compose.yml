@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # Database - MySQL
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: api
+    volumes:
+      - ./docker_data/mysql:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    restart: always
+    networks:
+      - api
+
+  # WebSocket Service
+  xe_socket:
+    build: .
+    container_name: xe_socket
+    working_dir: /usr/src/app
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/usr/src/app
+    networks:
+      - api
+    depends_on:
+      - mysql
+    restart: always
+    command: yarn start
+    environment:
+      NODE_ENV: production
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: secret
+      DB_NAME: api
+
+  # Adminer - Database Management
+  adminer:
+    image: adminer
+    container_name: adminer
+    restart: always
+    depends_on:
+      - mysql
+    ports:
+      - "8081:8080"
+    networks:
+      - api
+
+networks:
+  api:
+    driver: bridge
