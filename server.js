@@ -31,33 +31,150 @@ const getDriversWithRequestedRides = async () => {
   try {
     logToFile("Fetching drivers with requested rides...");
 
-    const [drivers] = await db.query(`
-          SELECT drll.ride_id, du.phone_number, du.id AS driver_id
-              FROM drivers_users du
-              JOIN driver_ride_location_logs drll 
-                  ON du.id = drll.driver_id
-              JOIN devices d 
-                  ON du.device_id = d.id
-              WHERE drll.ride_status = 'requested'
-              AND d.name = drll.vehicle_type
-              ORDER BY du.phone_number ASC, drll.ride_id DESC;
+    // Lấy danh sách các chuyến đi đang ở trạng thái "requested"
+    const [requestedRides] = await db.query(`
+        SELECT DISTINCT drll.ride_id, drll.vehicle_type, drll.pickup_location 
+        FROM driver_ride_location_logs drll
+        WHERE drll.ride_status = 'requested'
     `);
 
+    // Lấy danh sách tài xế đã có trong driver_ride_location_logs
+    const [existingDrivers] = await db.query(`
+        SELECT DISTINCT drll.ride_id, du.id AS driver_id, du.phone_number
+        FROM drivers_users du
+        JOIN driver_ride_location_logs drll ON du.id = drll.driver_id
+        JOIN devices d ON du.device_id = d.id
+        WHERE drll.ride_status = 'requested' AND d.name = drll.vehicle_type
+    `);
+
+    // Lấy danh sách tài xế active mà chưa có trong driver_ride_location_logs
+    const [newDrivers] = await db.query(`
+        SELECT DISTINCT ad.id AS driver_id, ad.phone_number, ad.device_id, ad.latitude, ad.longitude, ad.status, d.name AS vehicle_type
+        FROM drivers_users ad
+        JOIN devices d ON ad.device_id = d.id
+        WHERE ad.status = 'active'
+    `);
+
+    let insertedDrivers = [];
+
+    for (let ride of requestedRides) {
+      // Truy vấn toàn bộ dữ liệu của chuyến đi để dùng cho INSERT
+      const [rideDetails] = await db.query(
+        `SELECT * FROM driver_ride_location_logs WHERE ride_id = ? LIMIT 1`, 
+        [ride.ride_id]
+      );
+
+      if (rideDetails.length === 0) continue; // Nếu không có dữ liệu thì bỏ qua
+
+      const rideData = rideDetails[0]; // Dữ liệu gốc của chuyến đi
+
+      for (let driver of newDrivers) {
+        // Kiểm tra nếu driver chưa có trong danh sách tài xế đã nhận ride_id này
+        const alreadyExists = existingDrivers.some(
+          (ex) => ex.ride_id === ride.ride_id && ex.driver_id === driver.driver_id
+        );
+
+        if (!alreadyExists && driver.vehicle_type === ride.vehicle_type) {
+          // Tính khoảng cách giữa tài xế và điểm đón khách
+          const pickupLat = parseFloat(ride.pickup_location.split(",")[0]);
+          const pickupLon = parseFloat(ride.pickup_location.split(",")[1]);
+          const driverLat = parseFloat(driver.latitude);
+          const driverLon = parseFloat(driver.longitude);
+
+          const distanceKm = await calculateDistance(pickupLat, pickupLon, driverLat, driverLon);
+          const isAround10Km = distanceKm <= 10 ? 1 : 0;
+
+          logToFile(`Adding new active driver ${driver.driver_id} to ride_id ${ride.ride_id}, distance: ${distanceKm.toFixed(2)} km`);
+
+          // Chèn vào bảng driver_ride_location_logs với đầy đủ thông tin từ rideData, nhưng cập nhật is_around_10km
+          await db.query(
+            `INSERT INTO driver_ride_location_logs 
+            (ride_id, passenger_id, driver_id, is_around_10km, pickup_location, pickup_address, 
+             dropoff_location, dropoff_address, route_geometry, ride_status, accepted_at, started_at, 
+             completed_at, arrived_at_pickup_time, distance_km, estimated_fare, estimated_time, 
+             discount_amount, final_fare, actual_fare, waiting_fee, peak_hour_fee, duration_minutes, 
+             vehicle_type, voucher_id, rating, feedback, assigned_at, cancelable, driver_mobile_status, 
+             user_mobile_status, vat_percent, vat, location_id, latitude, longitude, device_id, 
+             created_at, updated_at, is_delete)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)`,
+            [
+              rideData.ride_id,
+              rideData.passenger_id,
+              driver.driver_id,
+              isAround10Km,
+              rideData.pickup_location,
+              rideData.pickup_address,
+              rideData.dropoff_location,
+              rideData.dropoff_address,
+              rideData.route_geometry,
+              rideData.ride_status,
+              rideData.accepted_at,
+              rideData.started_at,
+              rideData.completed_at,
+              rideData.arrived_at_pickup_time,
+              rideData.distance_km,
+              rideData.estimated_fare,
+              rideData.estimated_time,
+              rideData.discount_amount,
+              rideData.final_fare,
+              rideData.actual_fare,
+              rideData.waiting_fee,
+              rideData.peak_hour_fee,
+              rideData.duration_minutes,
+              rideData.vehicle_type,
+              rideData.voucher_id,
+              rideData.rating,
+              rideData.feedback,
+              rideData.assigned_at,
+              rideData.cancelable,
+              rideData.driver_mobile_status,
+              rideData.user_mobile_status,
+              rideData.vat_percent,
+              rideData.vat,
+              rideData.location_id,
+              driver.latitude,
+              driver.longitude,
+              driver.device_id,
+              0
+            ]
+          );
+
+          insertedDrivers.push({
+            ride_id: ride.ride_id,
+            driver_id: driver.driver_id,
+            phone_number: driver.phone_number,
+            distance_km: distanceKm.toFixed(2),
+          });
+        }
+      }
+    }
+
     const uniqueDriverPhoneNumbers = [
-      ...new Set(drivers.map((driver) => driver.phone_number)),
+      ...new Set(existingDrivers.map((driver) => driver.phone_number).concat(insertedDrivers.map((driver) => driver.phone_number))),
     ];
 
-    logToFile(
-      `Unique drivers with requested rides: ${JSON.stringify(
-        uniqueDriverPhoneNumbers
-      )}`
-    );
+    logToFile(`Unique drivers with requested rides (after insertion): ${JSON.stringify(uniqueDriverPhoneNumbers)}`);
 
     return uniqueDriverPhoneNumbers;
   } catch (error) {
     logToFile(`Error fetching drivers with requested rides: ${error.message}`);
     return [];
   }
+};
+
+// Hàm tính khoảng cách giữa hai tọa độ dựa trên công thức Haversine
+const calculateDistance = async (lat1, lon1, lat2, lon2) => {
+  const R = 6371; // Bán kính Trái Đất (km)
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 };
 
 const server = require("http").createServer();
