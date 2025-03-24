@@ -1,3 +1,8 @@
+const mysql = require("mysql2/promise");
+const WebSocket = require("ws");
+require("dotenv").config();
+const fs = require("fs");
+
 const logToFile = (message) => {
   const timestamp = new Date().toISOString();
   fs.appendFileSync("server.log", `[${timestamp}] ${message}\n`);
@@ -28,19 +33,20 @@ const getDriversWithRequestedRides = async () => {
 
     // Lấy danh sách các chuyến đi đang ở trạng thái "requested"
     const [requestedRides] = await db.query(`
-          SELECT DISTINCT drll.ride_id, drll.vehicle_type, drll.pickup_location
-          FROM driver_ride_location_logs drll
-          WHERE drll.ride_status = 'requested'
-      `);
+        SELECT DISTINCT drll.ride_id, drll.vehicle_type, drll.pickup_location 
+        FROM driver_ride_location_logs drll
+        WHERE drll.ride_status = 'requested'
+    `);
 
     // Lấy danh sách tài xế đã có trong driver_ride_location_logs
     const [existingDrivers] = await db.query(`
-          SELECT DISTINCT drll.ride_id, du.id AS driver_id, du.phone_number
-          FROM drivers_users du
-          JOIN driver_ride_location_logs drll ON du.id = drll.driver_id
-          JOIN devices d ON du.device_id = d.id
-          WHERE drll.ride_status = 'requested' AND d.name = drll.vehicle_type
-      `);
+        SELECT DISTINCT drll.ride_id, du.id AS driver_id, du.phone_number
+        FROM drivers_users du
+        JOIN driver_ride_location_logs drll ON du.id = drll.driver_id
+        JOIN devices d ON du.device_id = d.id
+        WHERE drll.ride_status = 'requested' AND d.name = drll.vehicle_type
+    `);
+
     // Lấy danh sách tài xế active mà chưa có trong driver_ride_location_logs
     const [newDrivers] = await db.query(`
         SELECT DISTINCT ad.id AS driver_id, ad.phone_number, ad.device_id, ad.latitude, ad.longitude, ad.status, d.name AS vehicle_type
@@ -65,8 +71,7 @@ const getDriversWithRequestedRides = async () => {
       for (let driver of newDrivers) {
         // Kiểm tra nếu driver chưa có trong danh sách tài xế đã nhận ride_id này
         const alreadyExists = existingDrivers.some(
-          (ex) =>
-            ex.ride_id === ride.ride_id && ex.driver_id === driver.driver_id
+          (ex) => ex.ride_id === ride.ride_id && ex.driver_id === driver.driver_id
         );
 
         if (!alreadyExists && driver.vehicle_type === ride.vehicle_type) {
@@ -76,31 +81,22 @@ const getDriversWithRequestedRides = async () => {
           const driverLat = parseFloat(driver.latitude);
           const driverLon = parseFloat(driver.longitude);
 
-          const distanceKm = await calculateDistance(
-            pickupLat,
-            pickupLon,
-            driverLat,
-            driverLon
-          );
+          const distanceKm = await calculateDistance(pickupLat, pickupLon, driverLat, driverLon);
           const isAround10Km = distanceKm <= 10 ? 1 : 0;
 
-          logToFile(
-            `Adding new active driver ${driver.driver_id} to ride_id ${ride.ride_id
-            }, distance: ${distanceKm.toFixed(2)} km`
-          );
+          logToFile(`Adding new active driver ${driver.driver_id} to ride_id ${ride.ride_id}, distance: ${distanceKm.toFixed(2)} km`);
 
           // Chèn vào bảng driver_ride_location_logs với đầy đủ thông tin từ rideData, nhưng cập nhật is_around_10km
           await db.query(
-            `INSERT INTO driver_ride_location_logs
-              (ride_id, passenger_id, driver_id, is_around_10km, pickup_location, pickup_address,
-               dropoff_location, dropoff_address, route_geometry, ride_status, accepted_at, started_at,
-               completed_at, arrived_at_pickup_time, distance_km, estimated_fare, estimated_time,
-               discount_amount, final_fare, actual_fare, waiting_fee, peak_hour_fee, duration_minutes,
-               vehicle_type, voucher_id, rating, feedback, assigned_at, cancelable, driver_mobile_status,
-               user_mobile_status, vat_percent, vat, location_id, latitude, longitude, device_id,
-               created_at, updated_at, is_delete)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)`,
-
+            `INSERT INTO driver_ride_location_logs 
+            (ride_id, passenger_id, driver_id, is_around_10km, pickup_location, pickup_address, 
+             dropoff_location, dropoff_address, route_geometry, ride_status, accepted_at, started_at, 
+             completed_at, arrived_at_pickup_time, distance_km, estimated_fare, estimated_time, 
+             discount_amount, final_fare, actual_fare, waiting_fee, peak_hour_fee, duration_minutes, 
+             vehicle_type, voucher_id, rating, feedback, assigned_at, cancelable, driver_mobile_status, 
+             user_mobile_status, vat_percent, vat, location_id, latitude, longitude, device_id, 
+             created_at, updated_at, is_delete)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)`,
             [
               rideData.ride_id,
               rideData.passenger_id,
@@ -139,9 +135,10 @@ const getDriversWithRequestedRides = async () => {
               driver.latitude,
               driver.longitude,
               driver.device_id,
-              0,
+              0
             ]
           );
+
           insertedDrivers.push({
             ride_id: ride.ride_id,
             driver_id: driver.driver_id,
@@ -153,18 +150,10 @@ const getDriversWithRequestedRides = async () => {
     }
 
     const uniqueDriverPhoneNumbers = [
-      ...new Set(
-        existingDrivers
-          .map((driver) => driver.phone_number)
-          .concat(insertedDrivers.map((driver) => driver.phone_number))
-      ),
+      ...new Set(existingDrivers.map((driver) => driver.phone_number).concat(insertedDrivers.map((driver) => driver.phone_number))),
     ];
 
-    logToFile(
-      `Unique drivers with requested rides (after insertion): ${JSON.stringify(
-        uniqueDriverPhoneNumbers
-      )}`
-    );
+    logToFile(`Unique drivers with requested rides (after insertion): ${JSON.stringify(uniqueDriverPhoneNumbers)}`);
 
     return uniqueDriverPhoneNumbers;
   } catch (error) {
@@ -261,11 +250,11 @@ const monitorDriverStatus = async () => {
   // Khởi tạo lần đầu
   try {
     const [initialRides] = await db.query(`
-        SELECT DISTINCT ride_id FROM driver_ride_location_logs
-        WHERE ride_status = 'requested'
-      `);
-    initialRides.forEach((ride) => knownRideIds.add(ride.ride_id));
-    logToFile(`Initial known ride IDs: ${Array.from(knownRideIds).join(", ")}`);
+      SELECT DISTINCT ride_id FROM driver_ride_location_logs 
+      WHERE ride_status = 'requested'
+    `);
+    initialRides.forEach(ride => knownRideIds.add(ride.ride_id));
+    logToFile(`Initial known ride IDs: ${Array.from(knownRideIds).join(', ')}`);
   } catch (error) {
     logToFile(`Error initializing ride tracking: ${error.message}`);
   }
@@ -274,15 +263,15 @@ const monitorDriverStatus = async () => {
     try {
       // Lấy danh sách chuyến đi hiện tại với trạng thái 'requested'
       const [currentRides] = await db.query(`
-          SELECT DISTINCT ride_id FROM driver_ride_location_logs
-          WHERE ride_status = 'requested'
-        `);
+        SELECT DISTINCT ride_id FROM driver_ride_location_logs 
+        WHERE ride_status = 'requested'
+      `);
 
-      const currentRideIds = new Set(currentRides.map((ride) => ride.ride_id));
+      const currentRideIds = new Set(currentRides.map(ride => ride.ride_id));
       const newRideIds = [];
 
       // Tìm những chuyến đi mới
-      currentRides.forEach((ride) => {
+      currentRides.forEach(ride => {
         if (!knownRideIds.has(ride.ride_id)) {
           newRideIds.push(ride.ride_id);
           knownRideIds.add(ride.ride_id);
@@ -290,14 +279,15 @@ const monitorDriverStatus = async () => {
       });
 
       // Xóa các chuyến đi không còn trong trạng thái 'requested' nữa
-      knownRideIds.forEach((rideId) => {
+      knownRideIds.forEach(rideId => {
         if (!currentRideIds.has(rideId)) {
           knownRideIds.delete(rideId);
         }
       });
+
       // Nếu có chuyến đi mới, gửi thông báo
       if (newRideIds.length > 0) {
-        logToFile(`New rides detected: ${newRideIds.join(", ")}`);
+        logToFile(`New rides detected: ${newRideIds.join(', ')}`);
 
         const requestedDrivers = await getDriversWithRequestedRides();
         const newData = {
@@ -305,9 +295,7 @@ const monitorDriverStatus = async () => {
         };
 
         console.log("New rides detected, sending update:", newData);
-        logToFile(
-          `Sending update due to new rides: ${JSON.stringify(newData)}`
-        );
+        logToFile(`Sending update due to new rides: ${JSON.stringify(newData)}`);
 
         wss.clients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN) {
