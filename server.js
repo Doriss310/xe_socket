@@ -40,12 +40,18 @@ const getDriversWithRequestedRides = async () => {
 
     // Lấy danh sách tài xế đã có trong driver_ride_location_logs
     const [existingDrivers] = await db.query(`
-        SELECT DISTINCT drll.ride_id, du.id AS driver_id, du.phone_number
-        FROM drivers_users du
-        JOIN driver_ride_location_logs drll ON du.id = drll.driver_id
-        JOIN devices d ON du.device_id = d.id
-        WHERE drll.ride_status = 'requested' AND d.name = drll.vehicle_type
-    `);
+      SELECT DISTINCT drll.ride_id, du.id AS driver_id, du.phone_number
+      FROM drivers_users du
+      JOIN driver_ride_location_logs drll ON du.id = drll.driver_id
+      JOIN devices d ON du.device_id = d.id
+      WHERE drll.ride_status = 'requested'
+        AND d.name = drll.vehicle_type
+        AND du.id NOT IN (
+          SELECT driver_id
+          FROM driver_ride_location_logs
+          WHERE ride_status IN ('accepted', 'arrived_at_pickup', 'in_progress')
+        )
+    `);    
 
     // Lấy danh sách tài xế active mà chưa có trong driver_ride_location_logs
     const [newDrivers] = await db.query(`
@@ -54,6 +60,14 @@ const getDriversWithRequestedRides = async () => {
         JOIN devices d ON ad.device_id = d.id
         WHERE ad.status = 'active' AND ad.is_active = 1 AND ad.is_delete = 0
     `);
+
+    // Lấy danh sách driver đang bận (ở bất kỳ ride nào)
+    const [busyDrivers] = await db.query(`
+      SELECT DISTINCT driver_id
+      FROM driver_ride_location_logs
+      WHERE ride_status IN ('accepted', 'arrived_at_pickup', 'in_progress')
+    `);
+    const busyDriverIds = new Set(busyDrivers.map(d => d.driver_id));
 
     let insertedDrivers = [];
 
@@ -150,8 +164,13 @@ const getDriversWithRequestedRides = async () => {
     }
 
     const uniqueDriverPhoneNumbers = [
-      ...new Set(existingDrivers.map((driver) => driver.phone_number).concat(insertedDrivers.map((driver) => driver.phone_number))),
-    ];
+      ...new Set(
+        existingDrivers
+          .concat(insertedDrivers)
+          .filter(driver => !busyDriverIds.has(driver.driver_id))
+          .map(driver => driver.phone_number)
+      ),
+    ];    
 
     logToFile(`Unique drivers with requested rides (after insertion): ${JSON.stringify(uniqueDriverPhoneNumbers)}`);
 
@@ -201,22 +220,23 @@ wss.on("connection", (ws) => {
   ws.on("message", (message) => {
     try {
       const parsedMessage = JSON.parse(message);
-
-      if (parsedMessage.type === "ping") {
-        const client = clients.get(ws);
-        if (client) {
-          client.lastActivity = Date.now();
-          client.isAlive = true;
+  
+      const client = clients.get(ws);
+      if (client) {
+        client.lastActivity = Date.now();
+        client.isAlive = true;
+  
+        // Lưu driver_id khi nhận được init
+        if (parsedMessage.type == "init" && parsedMessage.driver_id) {
+          client.driver_id = parsedMessage.driver_id;
+          logToFile(`Client ${client.id} đã khai báo driver_id: ${parsedMessage.driver_id}`);
         }
-
-        ws.send(
-          JSON.stringify({
-            type: "pong",
-            timestamp: Date.now(),
-          })
-        );
-
-        logToFile(`Nhận được ping từ client ${clientId}, đã gửi pong`);
+      }
+  
+      // Phản hồi ping
+      if (parsedMessage.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+        logToFile(`Nhận được ping từ client ${client?.id}, đã gửi pong`);
       } else {
         console.log("Nhận được tin nhắn:", parsedMessage);
       }
@@ -224,13 +244,16 @@ wss.on("connection", (ws) => {
       console.error("Lỗi khi xử lý tin nhắn:", error);
       logToFile(`Lỗi khi xử lý tin nhắn: ${error.message}`);
     }
-  });
+  });  
 
   ws.on("close", () => {
+    const client = clients.get(ws);
+    const driverId = client?.driver_id || "unknown";
+  
     console.log("Client disconnected");
-    logToFile(`Client ngắt kết nối (ID: ${clientId})`);
+    logToFile(`Client ngắt kết nối (Driver ID: ${driverId})`);
     clients.delete(ws);
-  });
+  });  
 
   ws.on("error", (error) => {
     console.error(`Lỗi trong kết nối client ${clientId}:`, error);
