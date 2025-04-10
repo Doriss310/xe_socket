@@ -2,6 +2,7 @@ const mysql = require("mysql2/promise");
 const WebSocket = require("ws");
 require("dotenv").config();
 const fs = require("fs");
+const axios = require("axios");
 
 const admin = require("firebase-admin");
 const serviceAccount = require("./firebase/serviceAccountKey.json");
@@ -42,15 +43,38 @@ const sendFCMNotification = async (deviceToken, title, body, data = {}) => {
     },
     data,
     token: deviceToken,
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+          contentAvailable: true,
+        },
+      },
+      headers: {
+        'apns-priority': '10',
+      },
+    },
+    android: {
+      priority: 'high',
+      notification: {
+        sound: 'default',
+        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+    },
   };
 
   try {
     const response = await admin.messaging().send(message);
-    logToFile(`✅ Sent FCM to ${deviceToken}: ${response}`);
+    logToFile(`✅ Sent FCM for ride_id ${data.ride_id} to ${deviceToken}: ${response}`);
+    return {
+      success: true,
+      ride_id: data.ride_id,
+      messageId: response
+    };
   } catch (error) {
-    logToFile(`❌ FCM Error for ${deviceToken}: ${error.message}`);
+    logToFile(`❌ FCM Error for ride_id ${data.ride_id} - ${deviceToken}: ${error.message}`);
 
-    // Gợi ý: xoá token nếu sai
     if (
       error.code === 'messaging/invalid-registration-token' ||
       error.code === 'messaging/registration-token-not-registered'
@@ -65,6 +89,12 @@ const sendFCMNotification = async (deviceToken, title, body, data = {}) => {
         logToFile(`DB error when removing FCM token: ${dbErr.message}`);
       }
     }
+
+    return {
+      success: false,
+      ride_id: data.ride_id,
+      error: error.message
+    };
   }
 };
 
@@ -214,6 +244,7 @@ const getDriversWithRequestedRides = async () => {
           SELECT driver_id FROM driver_ride_location_logs
           WHERE ride_status IN ('accepted', 'arrived_at_pickup', 'in_progress')
         )
+        AND drll.created_at >= NOW() - INTERVAL 5 MINUTE
     `);
 
     // Gửi FCM cho tất cả driver giống requestedDrivers (tức là chưa bận)
@@ -227,19 +258,23 @@ const getDriversWithRequestedRides = async () => {
       }
 
       const message = `Điểm đón: ${driver.pickup_address}\nĐiểm đến: ${driver.dropoff_address}`;
-      await sendFCMNotification(
+      const result = await sendFCMNotification(
         driver.fcm_token,
         "Yêu cầu chuyến đi mới",
         message,
         { ride_id: driver.ride_id.toString() }
       );
 
-      // ✅ Sau khi gửi thành công, cập nhật fcm_sent
-      await db.query(
-        `UPDATE driver_ride_location_logs SET fcm_sent = 1 
+      if (result.success) {
+        await db.query(
+          `UPDATE driver_ride_location_logs SET fcm_sent = 1 
            WHERE ride_id = ? AND driver_id = ?`,
-        [driver.ride_id, driver.driver_id]
-      );
+          [driver.ride_id, driver.driver_id]
+        );
+        logToFile(`✅ [ride_id ${result.ride_id}] FCM success: ${result.messageId}`);
+      } else {
+        logToFile(`❌ [ride_id ${result.ride_id}] FCM failed: ${result.error}`);
+      }
     }
 
     const uniqueDriverPhoneNumbers = [
@@ -278,67 +313,102 @@ const calculateDistance = async (lat1, lon1, lat2, lon2) => {
 const server = require("http").createServer();
 const wss = new WebSocket.Server({ server });
 
-wss.on("connection", (ws) => {
+wss.on("connection", async (ws, req) => {
   const clientId = Date.now();
-  console.log("Client connected");
-  logToFile(`Client kết nối mới (ID: ${clientId})`);
+  const queryString = req.url.split("?")[1];
+  const params = new URLSearchParams(queryString);
 
-  clients.set(ws, {
-    id: clientId,
-    isAlive: true,
-    lastActivity: Date.now(),
-  });
+  const token = params.get("token");
 
-  // Gửi danh sách ngay khi kết nối
-  getDriversWithRequestedRides().then((phoneNumbers) => {
+  if (!token) {
+    ws.send(JSON.stringify({ error: "Missing token" }));
+    ws.close();
+    return;
+  }
+
+  try {
+    // Gửi token sang Laravel API để xác thực DriverUser
+    const response = await axios.get("https://api.xeapp.vn/api/ws-driver-auth", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+    });
+
+    const driver = response.data;
+    logToFile(`✅ Driver authenticated (ID: ${driver.driver_id})`);
+
+    // Lưu thông tin vào danh sách client
+    clients.set(ws, {
+      id: driver.driver_id,
+      isAlive: true,
+      lastActivity: Date.now(),
+      token,
+    });
+
+    logToFile(`Client kết nối mới (Driver ID: ${driver.driver_id})`);
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        event: "authenticated",
+        driver_id: driver.driver_id
+      }));
+    }
+
+    // Gửi danh sách chuyến đi ngay khi kết nối thành công
+    const phoneNumbers = await getDriversWithRequestedRides();
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ event: "requested_drivers", phoneNumbers }));
     }
-  });
 
-  ws.on("message", (message) => {
-    try {
-      const parsedMessage = JSON.parse(message);
+    // Giữ nguyên các sự kiện sau:
 
-      const client = clients.get(ws);
-      if (client) {
-        client.lastActivity = Date.now();
-        client.isAlive = true;
+    ws.on("message", (message) => {
+      try {
+        const parsedMessage = JSON.parse(message);
 
-        // Lưu driver_id khi nhận được init
-        if (parsedMessage.type == "init" && parsedMessage.driver_id) {
-          client.driver_id = parsedMessage.driver_id;
-          logToFile(`Client ${client.id} đã khai báo driver_id: ${parsedMessage.driver_id}`);
+        if (parsedMessage.type === "ping") {
+          const client = clients.get(ws);
+          if (client) {
+            client.lastActivity = Date.now();
+            client.isAlive = true;
+          }
+
+          ws.send(
+            JSON.stringify({
+              type: "pong",
+              timestamp: Date.now(),
+            })
+          );
+
+          logToFile(`Nhận được ping từ client ${driver.driver_id}, đã gửi pong`);
+        } else {
+          console.log("Nhận được tin nhắn:", parsedMessage);
         }
+      } catch (error) {
+        console.error("Lỗi khi xử lý tin nhắn:", error);
+        logToFile(`Lỗi khi xử lý tin nhắn: ${error.message}`);
       }
+    });
 
-      // Phản hồi ping
-      if (parsedMessage.type === "ping") {
-        ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
-        logToFile(`Nhận được ping từ client ${client?.id}, đã gửi pong`);
-      } else {
-        console.log("Nhận được tin nhắn:", parsedMessage);
-      }
-    } catch (error) {
-      console.error("Lỗi khi xử lý tin nhắn:", error);
-      logToFile(`Lỗi khi xử lý tin nhắn: ${error.message}`);
-    }
-  });
+    ws.on("close", () => {
+      console.log("Client disconnected");
+      logToFile(`Client ngắt kết nối (Driver ID: ${driver.driver_id})`);
+      clients.delete(ws);
+    });
 
-  ws.on("close", () => {
-    const client = clients.get(ws);
-    const driverId = client?.driver_id || "unknown";
+    ws.on("error", (error) => {
+      console.error(`Lỗi trong kết nối client ${driver.driver_id}:`, error);
+      logToFile(`Lỗi trong kết nối client ${driver.driver_id}: ${error.message}`);
+      clients.delete(ws);
+    });
 
-    console.log("Client disconnected");
-    logToFile(`Client ngắt kết nối (Driver ID: ${driverId})`);
-    clients.delete(ws);
-  });
-
-  ws.on("error", (error) => {
-    console.error(`Lỗi trong kết nối client ${clientId}:`, error);
-    logToFile(`Lỗi trong kết nối client ${clientId}: ${error.message}`);
-    clients.delete(ws);
-  });
+  } catch (error) {
+    const message = error.response?.data?.message || error.message;
+    logToFile(`❌ WebSocket auth failed: ${message}`);
+    ws.send(JSON.stringify({ error: "Unauthorized: " + message }));
+    ws.close();
+  }
 });
 
 // Sửa lại logic để chỉ gửi thông báo khi có chuyến đi mới
