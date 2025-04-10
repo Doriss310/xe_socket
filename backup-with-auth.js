@@ -245,7 +245,7 @@ const getDriversWithRequestedRides = async () => {
           WHERE ride_status IN ('accepted', 'arrived_at_pickup', 'in_progress')
         )
         AND drll.created_at >= NOW() - INTERVAL 5 MINUTE
-    `);    
+    `);
 
     // Gửi FCM cho tất cả driver giống requestedDrivers (tức là chưa bận)
     const allDriversToNotify = existingDrivers.concat(insertedDrivers)
@@ -255,12 +255,12 @@ const getDriversWithRequestedRides = async () => {
       const isConnected = [...clients.values()].some(
         (c) => c.id === driver.driver_id && c.token
       );
-    
+
       if (!isConnected) {
         logToFile(`🚫 Bỏ qua FCM vì driver ${driver.driver_id} chưa kết nối WS`);
         continue;
       }
-      
+
       if (!driver.fcm_token) {
         logToFile(`⚠️ Driver ${driver.driver_id} không có FCM token`);
         continue;
@@ -324,7 +324,9 @@ const wss = new WebSocket.Server({ server });
 
 wss.on("connection", async (ws, req) => {
   const clientId = Date.now();
-  const params = new URLSearchParams(req.url.replace(/^\/\?/, ""));
+  const queryString = req.url.split("?")[1];
+  const params = new URLSearchParams(queryString);
+
   const token = params.get("token");
 
   if (!token) {
