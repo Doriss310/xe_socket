@@ -71,10 +71,10 @@ async function checkNewRequestedRides() {
 				}
 			);
 
-			logToFile("📤 Gửi Telegram (mới):", message);
+			logToFile(`📤 Gửi Telegram chuyến ${ride.id}:`, message);
 		}
 	} catch (err) {
-		logToFile("❌ Lỗi khi kiểm tra ride mới:", err.message);
+		logToFile(`❌ Lỗi khi kiểm tra ride  ${ride.id}:`, err.message);
 	}
 }
 
@@ -111,14 +111,14 @@ async function checkStatusOfTrackingRides() {
 					}
 				);
 
-				logToFile("📤 Gửi Telegram (hủy):", message);
+				logToFile(`📤 Gửi Telegram (hủy) chuyến ${ride.id}:`, message);
 				trackingRides.delete(ride.id);
 				continue;
 			}
 
 			// Đã hoàn thành
 			if (ride.ride_status === "completed") {
-				logToFile(`✅ Ride ${ride.id} đã hoàn thành`);
+				logToFile(`✅ Chuyến ${ride.id} đã hoàn thành`);
 				trackingRides.delete(ride.id);
 				continue;
 			}
@@ -148,7 +148,10 @@ async function checkStatusOfTrackingRides() {
 						}
 					);
 
-					logToFile("📤 Gửi Telegram (quá hạn lần đầu):", message);
+					logToFile(
+						`📤 Gửi Telegram (quá hạn lần đầu) Chuyến ${ride.id}:`,
+						message
+					);
 					track.notified = true;
 					track.lastOverdueNotify = now;
 				}
@@ -167,7 +170,10 @@ async function checkStatusOfTrackingRides() {
 							}
 						);
 
-						logToFile("📤 Gửi lại Telegram (quá 2 giờ):", message);
+						logToFile(
+							`📤 Gửi lại Telegram (quá 2 giờ) Chuyến ${ride.id}:`,
+							message
+						);
 						track.lastOverdueNotify = now;
 					}
 				}
@@ -180,7 +186,7 @@ async function checkStatusOfTrackingRides() {
 
 async function start() {
 	await connectToDatabase();
-	logToFile("🚦 Đang theo dõi ride mới, huỷ, hoàn thành và quá hạn...");
+	logToFile("🚦 Đang theo dõi chuyến mới, huỷ, hoàn thành và quá hạn...");
 
 	setInterval(() => {
 		checkNewRequestedRides();
